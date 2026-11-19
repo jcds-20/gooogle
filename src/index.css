@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+@keyframes bar-tremble {
+  0%, 100% { transform: translateX(0); }
+  10% { transform: translateX(-7px) rotate(-0.4deg); }
+  20% { transform: translateX(7px) rotate(0.4deg); }
+  30% { transform: translateX(-6px) rotate(-0.3deg); }
+  40% { transform: translateX(6px) rotate(0.3deg); }
+  50% { transform: translateX(-5px); }
+  60% { transform: translateX(5px); }
+  70% { transform: translateX(-3px); }
+  80% { transform: translateX(3px); }
+  90% { transform: translateX(-2px); }
+}
+
+.animate-bar-tremble {
+  animation: bar-tremble 1s ease-in-out;
+}
+
+@keyframes popup-in {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-popup-in {
+  animation: popup-in 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes page-rewind {
+  0% {
+    opacity: 0;
+    transform: translateX(48px) scale(0.9) rotate(4deg);
+  }
+  25% {
+    opacity: 1;
+    transform: translateX(0) scale(1) rotate(0deg);
+  }
+  75% {
+    opacity: 1;
+    transform: translateX(-28px) scale(0.95) rotate(-3deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-72px) scale(0.85) rotate(-6deg);
+  }
+}
+
+.animate-page-rewind {
+  animation: page-rewind 0.9s ease-in-out infinite;
+}

@@ -1,0 +1,6 @@
+{
+  "name": "World refersendnce",
+  "description": "Dictionnaires bilingues en ligne, conjugaison et définitions linguistiques en temps réel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
