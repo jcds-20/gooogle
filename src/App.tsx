@@ -13,14 +13,15 @@ import CodeEditorView from './components/CodeEditorView';
 import DirectoryModal from './components/DirectoryModal';
 import LegalWarningModal from './components/LegalWarningModal';
 import UnavailableGate from './components/UnavailableGate';
-import GateCodePage from './components/GateCodePage';
+import CodePage from './components/CodePage';
+import MessagesView from './components/MessagesView';
 import { downloadOfflineTranslator } from './utils/offlineTranslatorBuilder';
 import {
-  readStoredToken,
-  submitGate,
-  verifyToken,
-  writeStoredToken,
-} from './utils/gateClient';
+  readSession,
+  checkCode,
+  checkSession,
+  writeSession,
+} from './utils/session';
 
 type ViewMode =
   | 'google'
@@ -35,8 +36,6 @@ type ViewMode =
   | 'quiziniere'
   | 'code';
 
-// DECOYS: the arrow code and these commands look like unlock keys but only lead to dead ends.
-// The real second-stage command and final code are verified by the server only.
 const UNLOCK_SEQUENCE = ['ArrowDown', 'ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'];
 const STAGE_TWO_COMMANDS = ['/sudo', '/admin'];
 
@@ -245,7 +244,7 @@ function detectNavigationTarget(rawQuery: string): ViewMode | null {
 
 const PSEUDO_STORAGE_KEY = 'wr-pseudo';
 const CODE_STORAGE_KEY = 'wr-code';
-// Entries answered privately by the server (no access code) carry this room
+// Room used for entries shown only to their sender
 const PRIVATE_ROOM = 'local';
 
 function readStored(storage: 'local' | 'session', key: string): string {
@@ -312,21 +311,22 @@ export default function App() {
   const [selectedLangId, setSelectedLangId] = useState('enfr');
   const [darkMode, setDarkMode] = useState(false);
   const [pseudo, setPseudo] = useState<string>(loadPseudo);
-  // null = no valid access code = pure WordReference disguise (single definition, no history)
+  // null = no valid access code (single definition, no history)
   const [room, setRoom] = useState<string | null>(loadAccessCode);
 
-  // Latest message, still used by the fake views (they show a single response)
+  // Latest message (the other views show a single response)
   const currentEntry = entries.length > 0 ? entries[entries.length - 1] : null;
 
-  // Access token handed out by the SERVER at the end of the portal (kept per tab)
-  const [accessToken, setAccessToken] = useState<string | null>(readStoredToken);
-  const hasAccess = accessToken !== null;
-  // A stored token is checked with the server before showing anything
-  const [isResuming, setIsResuming] = useState<boolean>(() => readStoredToken() !== null);
+  // Session id of this tab
+  const [sessionId, setSessionId] = useState<string | null>(readSession);
+  const hasAccess = sessionId !== null;
+  // A stored session is checked before anything is shown
+  const [isResuming, setIsResuming] = useState<boolean>(() => readSession() !== null);
   const [showCodePage, setShowCodePage] = useState(false);
+  const [showMessages, setShowMessages] = useState(false);
 
-  const tokenRef = useRef<string | null>(accessToken);
-  const gateTicketRef = useRef<string | null>(null);
+  const sessionRef = useRef<string | null>(sessionId);
+  const stepRef = useRef<string | null>(null);
   const pseudoRef = useRef(pseudo);
   const roomRef = useRef(room);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -348,20 +348,20 @@ export default function App() {
     };
   }, []);
 
-  // Ask the server to (re)join the current room. Without a valid token it answers nothing.
+  // (Re)join the current room
   const sendJoin = useCallback(() => {
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN && tokenRef.current) {
-      ws.send(JSON.stringify({ type: 'join', room: roomRef.current, token: tokenRef.current }));
+    if (ws && ws.readyState === WebSocket.OPEN && sessionRef.current) {
+      ws.send(JSON.stringify({ type: 'join', room: roomRef.current, token: sessionRef.current }));
     }
   }, []);
 
-  // Back to the very beginning (token refused or expired)
-  const handleAccessLost = useCallback(() => {
-    writeStoredToken(null);
-    tokenRef.current = null;
-    gateTicketRef.current = null;
-    setAccessToken(null);
+  // Back to the start
+  const resetSession = useCallback(() => {
+    writeSession(null);
+    sessionRef.current = null;
+    stepRef.current = null;
+    setSessionId(null);
     setIsUnlocked(false);
     setShowCodePage(false);
     setViewMode('google');
@@ -369,20 +369,20 @@ export default function App() {
     setIsGatePassed(false);
   }, []);
 
-  // Resume a session: a token kept in this tab must still be valid on the server
+  // Resume the session of this tab
   useEffect(() => {
-    const stored = readStoredToken();
+    const stored = readSession();
     if (!stored) return;
     let cancelled = false;
-    verifyToken(stored).then((ok) => {
+    checkSession(stored).then((ok) => {
       if (cancelled) return;
       if (ok) {
         setIsGatePassed(true);
         setIsUnlocked(true);
       } else {
-        writeStoredToken(null);
-        tokenRef.current = null;
-        setAccessToken(null);
+        writeSession(null);
+        sessionRef.current = null;
+        setSessionId(null);
       }
       setIsResuming(false);
     });
@@ -405,7 +405,7 @@ export default function App() {
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
-        // (Re)join the current room on every (re)connection; the server answers with its history
+        // (Re)join the current room on every (re)connection
         ws.onopen = () => {
           if (isCancelled) return;
           sendJoin();
@@ -416,8 +416,8 @@ export default function App() {
           try {
             const data = JSON.parse(event.data);
             if (data.type === 'denied') {
-              // The server does not know this token (expired / server restarted)
-              if (tokenRef.current) handleAccessLost();
+              // Session expired
+              if (sessionRef.current) resetSession();
               return;
             }
             if (data.type === 'new_entry' && data.entry) {
@@ -478,7 +478,7 @@ export default function App() {
     setGoogleResetSignal((n) => n + 1);
   }, []);
 
-  // Short "trembling search bar" animation when the hidden mode switches on
+  // Short "trembling search bar" animation when the mode switches on
   const startActivation = useCallback(() => {
     if (activationTimerRef.current) clearTimeout(activationTimerRef.current);
     if (activationHideTimerRef.current) clearTimeout(activationHideTimerRef.current);
@@ -491,13 +491,13 @@ export default function App() {
     }, 1000);
   }, []);
 
-  // Stage 3 succeeded: the server handed out the token -> real chat unlocked
-  const grantAccess = useCallback(
+  // Open the session
+  const openSession = useCallback(
     (token: string) => {
-      writeStoredToken(token);
-      tokenRef.current = token;
-      gateTicketRef.current = null;
-      setAccessToken(token);
+      writeSession(token);
+      sessionRef.current = token;
+      stepRef.current = null;
+      setSessionId(token);
       setShowCodePage(false);
       setViewMode('google');
       setEntries([]);
@@ -509,23 +509,21 @@ export default function App() {
     [sendJoin, startActivation]
   );
 
-  // Stage 2: text typed on the fake Google that starts with "/". Only the server knows
-  // whether it is the real command. Returns true when it was consumed.
-  const handleGateAttempt = useCallback(async (raw: string): Promise<boolean> => {
+  // Text starting with "/" typed in the search bar. Returns true when it was consumed.
+  const handleSlashInput = useCallback(async (raw: string): Promise<boolean> => {
     const attempt = raw.trim();
     if (!attempt.startsWith('/')) return false;
 
-    // DECOYS: look like the second-stage command, lead to a code page that never succeeds
     if (STAGE_TWO_COMMANDS.includes(attempt.toLowerCase())) {
       setShowCodePage(true);
       return true;
     }
 
-    const ticket = gateTicketRef.current;
-    if (!ticket) return false;
-    const reply = await submitGate(2, attempt, ticket);
+    const step = stepRef.current;
+    if (!step) return false;
+    const reply = await checkCode(2, attempt, step);
     if (!reply.ok) return false;
-    if (reply.ticket) gateTicketRef.current = reply.ticket;
+    if (reply.ticket) stepRef.current = reply.ticket;
     setShowCodePage(true);
     return true;
   }, []);
@@ -542,9 +540,9 @@ export default function App() {
       }
 
       // /pseudo <nom> and /code <abc>: local settings, never sent as messages.
-      // Without the server token the chat does not exist: nothing happens.
+      // They need an open session.
       const chatCommand = parseChatCommand(query);
-      if (chatCommand && !tokenRef.current) return;
+      if (chatCommand && !sessionRef.current) return;
       if (chatCommand) {
         if (chatCommand.cmd === 'pseudo') {
           const newPseudo =
@@ -553,14 +551,14 @@ export default function App() {
           setPseudo(newPseudo);
           writeStored('local', PSEUDO_STORAGE_KEY, newPseudo);
         } else {
-          // Empty or invalid code -> back to the pure disguise (no history, no list)
+          // Empty or invalid code -> back to the plain mode (no history, no list)
           const newRoom = parseAccessCode(chatCommand.arg);
           if (newRoom !== roomRef.current) {
             roomRef.current = newRoom;
             setRoom(newRoom);
             writeStored('session', CODE_STORAGE_KEY, newRoom);
             setEntries([]);
-            // Valid code: the server replies with that room's history. Null: leave the room.
+            // Valid code: the history of that room is loaded. Null: leave the room.
             sendJoin();
           }
         }
@@ -568,20 +566,20 @@ export default function App() {
       }
 
       // Download offline trilingual translator when unlocked
-      if (isUnlocked && tokenRef.current && isTranslatorDownloadCommand(query)) {
+      if (isUnlocked && sessionRef.current && isTranslatorDownloadCommand(query)) {
         downloadOfflineTranslator();
         return;
       }
 
-      // Navigate between the fake sites: only with a server token AND the unlocked state
-      const navTarget = isUnlocked && tokenRef.current ? detectNavigationTarget(query) : null;
+      // Navigate between the pages
+      const navTarget = isUnlocked && sessionRef.current ? detectNavigationTarget(query) : null;
       if (navTarget) {
         setViewMode(navTarget);
         return;
       }
 
-      // No server token = no chat: nothing is sent, nothing comes back
-      const token = tokenRef.current;
+      // No session: nothing to send
+      const token = sessionRef.current;
       if (!token) return;
 
       // Otherwise broadcast chat/definition in real time
@@ -659,7 +657,7 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && !e.altKey) {
         const keyLower = e.key.toLowerCase();
         if (keyLower === 'f') {
-          if (!isUnlocked || !tokenRef.current) return;
+          if (!isUnlocked || !sessionRef.current) return;
           e.preventDefault();
           e.stopPropagation();
           setShowDirectory((prev) => !prev);
@@ -695,9 +693,8 @@ export default function App() {
         e.key === 'ArrowLeft' ||
         e.key === 'ArrowRight'
       ) {
-        // Decoy page (no server token): the arrow code does absolutely nothing.
-        // It is not even tracked; it only acts on a session that already holds a token.
-        if (!tokenRef.current) {
+        // The arrow code only acts on an open session.
+        if (!sessionRef.current) {
           unlockBufferRef.current = [];
           return;
         }
@@ -710,7 +707,7 @@ export default function App() {
           next.every((val, idx) => val === UNLOCK_SEQUENCE[idx]);
 
         if (matches) {
-          // Only reachable with a server token: hides / shows the unlocked session
+          // Hides / shows the unlocked session
           unlockBufferRef.current = [];
           if (activationTimerRef.current) {
             clearTimeout(activationTimerRef.current);
@@ -739,7 +736,7 @@ export default function App() {
 
   // Sync browser tab title with active view
   useEffect(() => {
-    if (!isGatePassed || showCodePage) return;
+    if (!isGatePassed || showCodePage || showMessages) return;
     if (viewMode === 'ecoledirecte') {
       document.title = 'EcoleDirecte - Cahier de textes';
     } else if (viewMode === 'google') {
@@ -763,7 +760,7 @@ export default function App() {
     } else {
       document.title = 'WordReference.com | Dictionnaires de langue en ligne';
     }
-  }, [isGatePassed, viewMode, showCodePage]);
+  }, [isGatePassed, viewMode, showCodePage, showMessages]);
 
   // Keep the latest message in view
   useEffect(() => {
@@ -774,7 +771,7 @@ export default function App() {
   const selectedLangObj =
     DICTIONARY_OPTIONS.find((d) => d.id === selectedLangId) || DICTIONARY_OPTIONS[0];
 
-  // A stored token is being checked: show nothing yet
+  // Session check in progress
   if (isResuming) {
     return <div className="min-h-screen w-full bg-white" />;
   }
@@ -782,22 +779,28 @@ export default function App() {
   if (!isGatePassed) {
     return (
       <UnavailableGate
-        // Decoy exits (old shortcut / old maze): plain Google, no ticket, nothing real
         onUnlock={() => setIsGatePassed(true)}
-        // The server accepted the real entry key: remember the ticket, show the fake Google
-        onTicket={(ticket) => {
-          gateTicketRef.current = ticket;
+        onProceed={(step) => {
+          stepRef.current = step;
           setIsGatePassed(true);
         }}
       />
     );
   }
 
+  if (showMessages) {
+    return <MessagesView onExit={() => setShowMessages(false)} />;
+  }
+
   if (showCodePage) {
     return (
-      <GateCodePage
-        ticket={gateTicketRef.current}
-        onGranted={grantAccess}
+      <CodePage
+        step={stepRef.current}
+        onGranted={openSession}
+        onOpen={() => {
+          setShowCodePage(false);
+          setShowMessages(true);
+        }}
         onCancel={() => setShowCodePage(false)}
       />
     );
@@ -816,7 +819,6 @@ export default function App() {
 
       {viewMode === 'google' && (
         <GoogleNewTabView
-          // Unlocked state only counts together with a server token
           isUnlocked={isUnlocked && hasAccess}
           activationPhase={activationPhase}
           currentResponse={currentEntry ? currentEntry.definition : null}
@@ -825,7 +827,7 @@ export default function App() {
             hasAccess &&
             (detectNavigationTarget(q) !== null || isTranslatorDownloadCommand(q))
           }
-          onGateAttempt={hasAccess ? undefined : handleGateAttempt}
+          onSlashInput={hasAccess ? undefined : handleSlashInput}
           onSendQuery={sendQuery}
           onClearResponse={() => setEntries([])}
           onGoHome={goHome}
@@ -1183,7 +1185,7 @@ export default function App() {
           isUnlocked={isUnlocked && hasAccess}
           currentMode={viewMode}
           onUnlockAndNavigate={(mode) => {
-            if (!tokenRef.current) return;
+            if (!sessionRef.current) return;
             setIsUnlocked(true);
             setViewMode(mode);
             setShowDirectory(false);

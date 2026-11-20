@@ -1,17 +1,18 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { AlertCircle, RotateCcw, ShieldCheck } from 'lucide-react';
 import LegalWarningModal from './LegalWarningModal';
-import { submitGate } from '../utils/gateClient';
+import { checkCode } from '../utils/session';
 
 interface UnavailableGateProps {
-  // Decoy exits (old shortcut + old maze): lead to a plain Google page and nothing real
   onUnlock: () => void;
-  // Called when the SERVER accepted what was typed on the landing page
-  onTicket: (ticket: string) => void;
+  onProceed: (step: string) => void;
 }
 
 type GateStage =
   | 'not_found'
+  | 'oops'
+  | 'welcome'
+  | 'locked'
   | 'google_deleted'
   | 'blank_motion'
   | 'troll_url'
@@ -22,15 +23,119 @@ type GateStage =
   | 'binary'
   | 'captcha';
 
-// DECOYS: these look like entry keys but only lead to dead ends.
-// The real entry key is verified by the server and is not in this file.
-const ENTRY_TRIGGER = 'aeiavectoijememarie'; // old maze (dead end)
-const FAST_TRIGGER = 'aeijtm'; // old shortcut (dead end)
-const MASTER_KEY = 'ouvretoi42'; // decoy
-const ADMIN_BYPASS = 'adminbypass'; // decoy
-const DECOY_KEYS = [FAST_TRIGGER, MASTER_KEY, ADMIN_BYPASS];
+const ENTRY_TRIGGER = 'aeiavectoijememarie';
+const FAST_TRIGGER = 'aeijtm';
+const MASTER_KEY = 'ouvretoi42';
+const ALT_KEYS = [FAST_TRIGGER, MASTER_KEY];
+
+// entry key / DEBUG access
+const DEV_ACCESS = {
+  ENTRY_CODE: 'bravotumatrouver', // entry key
+  ACCESS_KEY: 'devaccess2024', // DEBUG access
+  DEBUG_KEY: 'letmeinplease', // DEBUG access (staging)
+};
+
+// review notes
+const NOTE_PARTS = ['ique', 'plast', 'fdart', 'lepro'];
+const stitchParts = (parts: string[]) => [...parts].reverse().join('');
+
+// build metadata
+const BUILD_META = {
+  version: '3.8.2',
+  channel: 'stable',
+  region: 'eu-west-3',
+  ttl: 3600,
+  seed: [23, 91, 8, 66, 37, 112, 54],
+  blob: [116, 58, 110, 35, 87, 20, 69, 120, 46, 123, 46, 64, 6, 83, 100, 47, 97, 35, 76, 2, 83],
+};
+const resolveTag = (meta: typeof BUILD_META) =>
+  meta.blob.map((b, i) => String.fromCharCode(b ^ meta.seed[i % meta.seed.length])).join('');
+
+// Common words
+const COMMON_WORDS = ['password', 'google', 'gooogle', 'enter', 'open', 'sesame', 'unlock', 'hack'];
+// Word that opens the admin page
+const ADMIN_WORD = 'admin';
+// Words that lock the page for 10 minutes
+const STRIKE_WORDS = ['bypass'];
+const LOCKOUT_MS = 10 * 60 * 1000;
+
+interface MockPage {
+  emoji: string;
+  title: string;
+  lines: string[];
+  background: string;
+  titleClass: string;
+}
+
+// Message pages, indexed by level (0 = generic, 1..3 = increasingly "impressed")
+const MOCK_PAGES: MockPage[] = [
+  {
+    emoji: '😜',
+    title: "Et non, tu t'es fait avoir",
+    lines: ['Dommage.'],
+    background: 'from-[#1b1035] via-[#2a1458] to-[#3b1d7a]',
+    titleClass: 'text-[28px] sm:text-[36px]',
+  },
+  {
+    emoji: '👀',
+    title: 'Oh, on a un(e) petit(e) curieux(se)…',
+    lines: ["Intéressant 👀 Continue à fouiller, on sait jamais."],
+    background: 'from-[#0f172a] via-[#1e3a8a] to-[#2563eb]',
+    titleClass: 'text-[28px] sm:text-[36px]',
+  },
+  {
+    emoji: '😏',
+    title: "Oh, on dirait que t'es plus fort que prévu.",
+    lines: ['Mais… toujours pas 😏'],
+    background: 'from-[#3b0764] via-[#9d174d] to-[#ea580c]',
+    titleClass: 'text-[30px] sm:text-[40px]',
+  },
+  {
+    emoji: '👏',
+    title: "Wow, ok, là j'applaudis 👏",
+    lines: ["Mais désolé, t'as juste perdu ton temps.", "DOMMAGE, merci d'avoir testé 🙃"],
+    background: 'from-[#0a0a0a] via-[#1c1917] to-[#a16207]',
+    titleClass: 'text-[34px] sm:text-[48px]',
+  },
+];
+const CLAP_POSITIONS = [
+  { left: '8%', top: '14%', delay: '0s' },
+  { left: '86%', top: '18%', delay: '0.3s' },
+  { left: '14%', top: '72%', delay: '0.6s' },
+  { left: '80%', top: '68%', delay: '0.15s' },
+  { left: '48%', top: '8%', delay: '0.45s' },
+  { left: '52%', top: '88%', delay: '0.75s' },
+];
+const LOCK_STORAGE_KEY = 'wr-lock';
+
+const MAX_KEY_BUFFER = 40;
 const MAX_TYPED_BUFFER = 40;
 const SUBMIT_IDLE_MS = 1500;
+
+function readLockUntil(): number {
+  try {
+    const until = Number(sessionStorage.getItem(LOCK_STORAGE_KEY));
+    return Number.isFinite(until) ? until : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeLockUntil(until: number | null) {
+  try {
+    if (until === null) sessionStorage.removeItem(LOCK_STORAGE_KEY);
+    else sessionStorage.setItem(LOCK_STORAGE_KEY, String(until));
+  } catch {
+    // sessionStorage unavailable: the lock only lives in memory
+  }
+}
+
+function formatMinSec(totalMs: number): string {
+  const totalSec = Math.max(0, Math.ceil(totalMs / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
 
 const ABSTRACT_MONOLOGUE = [
   "Parfois, un chiffre oublie qu'il était censé mesurer quelque chose et préfère simplement s'asseoir entre deux virgules, là où les horloges ne savent plus si elles avancent par habitude ou par politesse envers les secondes qui passent sans demander leur chemin.",
@@ -72,11 +177,86 @@ function formatSecondsHMS(totalSec: number): string {
   return [h, m, s].map((v) => String(v).padStart(2, '0')).join(':');
 }
 
-export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateProps) {
-  const [stage, setStage] = useState<GateStage>('not_found');
+export default function UnavailableGate({ onUnlock, onProceed }: UnavailableGateProps) {
+  // A lockout still running (kept in sessionStorage) survives a reload of the page
+  const lockUntilRef = useRef<number>(readLockUntil());
+  const [stage, setStage] = useState<GateStage>(() =>
+    lockUntilRef.current > Date.now() ? 'locked' : 'not_found'
+  );
+  const [lockRemainingMs, setLockRemainingMs] = useState(() =>
+    Math.max(0, lockUntilRef.current - Date.now())
+  );
   const [googleClickStep, setGoogleClickStep] = useState<0 | 1 | 2>(0);
+  const [mockLevel, setMockLevel] = useState(0);
+  const [adminBusy, setAdminBusy] = useState(false);
+  const adminTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Stage 1: buffers for the decoy triggers + the text sent to the server
+  useEffect(() => {
+    return () => {
+      if (adminTimerRef.current) clearTimeout(adminTimerRef.current);
+    };
+  }, []);
+
+  const showMockPage = (level: number) => {
+    setMockLevel(level);
+    if (level === 3) {
+      // The countdown starts as soon as this page shows, so a reload does not escape it
+      const until = Date.now() + LOCKOUT_MS;
+      lockUntilRef.current = until;
+      writeLockUntil(until);
+      setLockRemainingMs(LOCKOUT_MS);
+    }
+    setStage('oops');
+  };
+
+  const handleAdminLogin = () => {
+    if (adminBusy) return;
+    setAdminBusy(true);
+    adminTimerRef.current = setTimeout(() => {
+      setAdminBusy(false);
+      showMockPage(1);
+    }, 1200);
+  };
+
+  const startLockout = () => {
+    const until = Date.now() + LOCKOUT_MS;
+    lockUntilRef.current = until;
+    writeLockUntil(until);
+    setLockRemainingMs(LOCKOUT_MS);
+    setStage('locked');
+  };
+
+  // Lockout countdown: typing is blocked until the deadline, then back to the landing page
+  useEffect(() => {
+    if (stage !== 'locked') return;
+
+    const tick = () => {
+      const remaining = lockUntilRef.current - Date.now();
+      if (remaining <= 0) {
+        lockUntilRef.current = 0;
+        writeLockUntil(null);
+        setLockRemainingMs(0);
+        setStage('not_found');
+        return;
+      }
+      setLockRemainingMs(remaining);
+    };
+    tick();
+    const interval = setInterval(tick, 250);
+    return () => clearInterval(interval);
+  }, [stage]);
+
+  // Developer notice
+  useEffect(() => {
+    console.log(
+      '%c🔑 Accès développeur',
+      'font-size:15px;font-weight:bold;color:#1a73e8'
+    );
+    console.log("Le mot d'entrée est caché dans le code source. Cherche bien…");
+    console.log('debug.entry =', btoa(stitchParts(NOTE_PARTS)));
+  }, []);
+
+  // Stage 1: typed-key buffers
   const entryBufferRef = useRef('');
   const typedBufferRef = useRef('');
 
@@ -96,7 +276,7 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
   const lastCtrlFOrKRef = useRef<number>(0);
   const lastCtrlJRef = useRef<number>(0);
 
-  // Stage 7: 1-hour timer + hidden double-click editor
+  // Stage 7: 1-hour timer + double-click editor
   const [secondsLeft, setSecondsLeft] = useState(3600);
   const [showTimerEditBtn, setShowTimerEditBtn] = useState(false);
   const [isEditingTimer, setIsEditingTimer] = useState(false);
@@ -110,7 +290,7 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
   // Stage 9: Binary focus container
   const binaryContainerRef = useRef<HTMLDivElement>(null);
 
-  // Stage 10: Captcha trap
+  // Stage 10: Captcha
   const [captchaChecks, setCaptchaChecks] = useState(0);
   const [captchaVerifying, setCaptchaVerifying] = useState(false);
   const captchaVerifyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -129,10 +309,16 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
     };
   }, []);
 
-  // Sync realistic browser tab title per security stage
+  // Sync browser tab title per stage
   useEffect(() => {
     if (stage === 'not_found') {
       document.title = 'Error: Page not found';
+    } else if (stage === 'oops') {
+      document.title = ['Raté !', 'Hmm…', 'Presque…', 'Bravo'][mockLevel] ?? 'Raté !';
+    } else if (stage === 'welcome') {
+      document.title = 'Administration';
+    } else if (stage === 'locked') {
+      document.title = 'Accès verrouillé';
     } else if (stage === 'loading') {
       document.title = 'Chargement...';
     } else if (stage === 'legal') {
@@ -146,7 +332,7 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
     } else {
       document.title = 'Page indisponible';
     }
-  }, [stage]);
+  }, [stage, mockLevel]);
 
   // Reset stage-specific trackers when entering a stage
   useEffect(() => {
@@ -181,15 +367,20 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
     }
   }, [stage]);
 
-  // Stage 1: typing in the void.
-  //  - decoys (checked locally): old shortcut -> plain Google, old maze -> maze
-  //  - anything else is sent to the server (on Enter, or after a short pause);
-  //    only the server knows whether it is the real key
+  // Stage 1: typing in the void (checked on Enter, or after a short pause)
   useEffect(() => {
     if (stage !== 'not_found') return;
 
     let cancelled = false;
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // [word, page level]; the last two entries are assembled when the page shows
+    const levelKeys: [string, number][] = [
+      ...Object.values(DEV_ACCESS).map((word): [string, number] => [word, 1]),
+      [stitchParts(NOTE_PARTS), 2],
+      [resolveTag(BUILD_META), 3],
+      ...COMMON_WORDS.map((word): [string, number] => [word, 0]),
+    ];
 
     const clearIdle = () => {
       if (idleTimer) {
@@ -203,9 +394,9 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
       const attempt = typedBufferRef.current;
       typedBufferRef.current = '';
       if (attempt.length < 4) return;
-      const reply = await submitGate(1, attempt);
+      const reply = await checkCode(1, attempt);
       if (!cancelled && reply.ok && reply.ticket) {
-        onTicket(reply.ticket);
+        onProceed(reply.ticket);
       }
     };
 
@@ -219,10 +410,42 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
 
       if (e.key.length !== 1 || e.key === ' ') return;
 
-      const next = (entryBufferRef.current + e.key.toLowerCase()).slice(-ENTRY_TRIGGER.length);
+      const next = (entryBufferRef.current + e.key.toLowerCase()).slice(-MAX_KEY_BUFFER);
       entryBufferRef.current = next;
 
-      if (DECOY_KEYS.some((key) => next.endsWith(key))) {
+      // Lockout words
+      if (STRIKE_WORDS.some((word) => next.endsWith(word))) {
+        e.preventDefault();
+        entryBufferRef.current = '';
+        typedBufferRef.current = '';
+        clearIdle();
+        startLockout();
+        return;
+      }
+
+      // Admin page
+      if (next.endsWith(ADMIN_WORD)) {
+        e.preventDefault();
+        entryBufferRef.current = '';
+        typedBufferRef.current = '';
+        clearIdle();
+        setAdminBusy(false);
+        setStage('welcome');
+        return;
+      }
+
+      // Known words
+      const known = levelKeys.find(([word]) => next.endsWith(word));
+      if (known) {
+        e.preventDefault();
+        entryBufferRef.current = '';
+        typedBufferRef.current = '';
+        clearIdle();
+        showMockPage(known[1]);
+        return;
+      }
+
+      if (ALT_KEYS.some((key) => next.endsWith(key))) {
         // Do not let the last typed key leak into the next page's search bar
         e.preventDefault();
         entryBufferRef.current = '';
@@ -232,7 +455,7 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
         return;
       }
 
-      if (next === ENTRY_TRIGGER) {
+      if (next.endsWith(ENTRY_TRIGGER)) {
         e.preventDefault();
         entryBufferRef.current = '';
         typedBufferRef.current = '';
@@ -252,7 +475,7 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
       clearIdle();
       window.removeEventListener('keydown', handleKeyDown, { capture: true });
     };
-  }, [stage, onUnlock, onTicket]);
+  }, [stage, onUnlock, onProceed]);
 
   // Stage 3: Mouse movement tracker (up then down) + keyboard "40 12"
   useEffect(() => {
@@ -416,7 +639,7 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
     return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
   }, [stage]);
 
-  // Stage 10: Captcha 11s passive unlock after 2 or 3 decoy checks without checking again
+  // Stage 10: Captcha 11s passive unlock after 2 or 3 checks without checking again
   useEffect(() => {
     if (stage !== 'captcha') return;
     if (captchaVerifying) return;
@@ -492,6 +715,103 @@ export default function UnavailableGate({ onUnlock, onTicket }: UnavailableGateP
       setCaptchaChecks((prev) => prev + 1);
     }, 2000);
   };
+
+  // Admin page
+  if (stage === 'welcome') {
+    return (
+      <div className="min-h-screen w-full bg-[#f1f5f9] text-[#0f172a] flex items-center justify-center p-6 font-sans antialiased select-none">
+        <div className="w-full max-w-[400px] bg-white border border-[#e2e8f0] rounded-2xl p-8 text-center shadow-sm space-y-5">
+          <div className="w-14 h-14 mx-auto rounded-full bg-[#1e293b] text-white flex items-center justify-center text-[22px] font-semibold">
+            A
+          </div>
+          <div className="space-y-1">
+            <h1 className="text-[22px] font-semibold">Bienvenue admin</h1>
+            <p className="text-[13px] text-[#64748b]">Dernière connexion : il y a 2 jours</p>
+          </div>
+          <button
+            type="button"
+            onClick={handleAdminLogin}
+            disabled={adminBusy}
+            className="w-full h-11 rounded-lg bg-[#1e293b] hover:bg-[#0f172a] disabled:opacity-70 text-white text-[14.5px] font-medium cursor-pointer transition-colors"
+          >
+            {adminBusy ? 'Connexion…' : 'Se connecter au vrai site'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Message pages
+  if (stage === 'oops') {
+    const page = MOCK_PAGES[mockLevel] ?? MOCK_PAGES[0];
+    return (
+      <div
+        className={`relative overflow-hidden min-h-screen w-full bg-gradient-to-br ${page.background} text-white flex items-center justify-center p-6 font-sans antialiased select-none`}
+      >
+        {mockLevel === 3 &&
+          CLAP_POSITIONS.map((pos, i) => (
+            <span
+              key={i}
+              aria-hidden="true"
+              className="absolute text-[34px] sm:text-[44px] animate-bounce opacity-80"
+              style={{ left: pos.left, top: pos.top, animationDelay: pos.delay }}
+            >
+              👏
+            </span>
+          ))}
+        <div className="relative w-full max-w-[560px] text-center space-y-6">
+          <div className="text-[84px] sm:text-[104px] leading-none animate-bounce" aria-hidden="true">
+            {page.emoji}
+          </div>
+          <h1 className={`${page.titleClass} font-extrabold tracking-tight`}>{page.title}</h1>
+          <div className="space-y-1.5">
+            {page.lines.map((line, i) => (
+              <p
+                key={i}
+                className={`text-[18px] sm:text-[20px] ${
+                  mockLevel === 3 && i === page.lines.length - 1
+                    ? 'font-bold text-white'
+                    : 'text-white/75'
+                }`}
+              >
+                {line}
+              </p>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => (mockLevel === 3 ? setStage('locked') : setStage('not_found'))}
+            className="mt-2 px-7 py-3 rounded-full bg-white/10 hover:bg-white/20 border border-white/25 text-[15px] font-medium cursor-pointer transition-colors"
+          >
+            Réessayer
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Lockout page: input is blocked until the countdown reaches zero
+  if (stage === 'locked') {
+    return (
+      <div className="min-h-screen w-full bg-[#f8fafc] text-[#0f172a] flex items-center justify-center p-6 font-sans antialiased select-none">
+        <div className="w-full max-w-[420px] bg-white border border-[#e2e8f0] rounded-2xl p-8 text-center shadow-sm space-y-5">
+          <div className="w-12 h-12 mx-auto rounded-full bg-red-100 text-red-600 flex items-center justify-center">
+            <ShieldCheck className="w-6 h-6" />
+          </div>
+          <div className="space-y-1">
+            <h1 className="text-[20px] sm:text-[22px] font-semibold">Trop de tentatives</h1>
+            <p className="text-[14px] text-[#64748b]">Accès verrouillé. Réessayez dans :</p>
+          </div>
+          <div
+            className="text-[48px] sm:text-[56px] font-mono font-bold tracking-wider text-[#1e293b] tabular-nums"
+            role="timer"
+          >
+            {formatMinSec(lockRemainingMs)}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Stage 1: Exact "Error: Page not found" screen ("aeiavectoijememarie" -> flow, "aeijtm" -> fast Google)
   if (stage === 'not_found') {

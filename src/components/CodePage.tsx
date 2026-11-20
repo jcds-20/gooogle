@@ -1,22 +1,33 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { submitGate } from '../utils/gateClient';
+import { checkCode } from '../utils/session';
 
-interface GateCodePageProps {
-  ticket: string | null;
+interface CodePageProps {
+  step: string | null;
   onGranted: (token: string) => void;
+  onOpen: () => void;
   onCancel: () => void;
 }
 
-// DECOY: looks like the final passphrase, only leads to a fake error.
-// The real code is verified by the server and is not in this file.
 const FINAL_PASSPHRASE = 'soleil42';
+const ALT_CODE = 'opensesame';
 
-type Status = 'idle' | 'checking' | 'wrong' | 'unavailable';
+type Status = 'idle' | 'checking' | 'wrong' | 'unavailable' | 'granted' | 'opening';
 
-export default function GateCodePage({ ticket, onGranted, onCancel }: GateCodePageProps) {
+export default function CodePage({
+  step,
+  onGranted,
+  onOpen,
+  onCancel,
+}: CodePageProps) {
   const [code, setCode] = useState('');
   const [status, setStatus] = useState<Status>('idle');
   const inputRef = useRef<HTMLInputElement>(null);
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  // Cancel pending steps when leaving the page
+  useEffect(() => {
+    return () => timersRef.current.forEach(clearTimeout);
+  }, []);
 
   // Focus the field right away (a few retries: Firefox/Zen sometimes ignores the first focus())
   useEffect(() => {
@@ -59,12 +70,20 @@ export default function GateCodePage({ ticket, onGranted, onCancel }: GateCodePa
     setStatus('checking');
 
     if (attempt.toLowerCase() === FINAL_PASSPHRASE) {
-      // Decoy: pretend to work, then fail
       setTimeout(() => setStatus('unavailable'), 1800);
       return;
     }
 
-    const reply = await submitGate(3, attempt, ticket);
+    if (attempt.toLowerCase() === ALT_CODE) {
+      timersRef.current = [
+        setTimeout(() => setStatus('granted'), 1200),
+        setTimeout(() => setStatus('opening'), 2400),
+        setTimeout(() => onOpen(), 3800),
+      ];
+      return;
+    }
+
+    const reply = await checkCode(3, attempt, step);
     if (reply.ok && reply.token) {
       onGranted(reply.token);
       return;
@@ -73,6 +92,30 @@ export default function GateCodePage({ ticket, onGranted, onCancel }: GateCodePa
     setCode('');
     inputRef.current?.focus();
   };
+
+  // Access granted screen
+  if (status === 'granted' || status === 'opening') {
+    return (
+      <div className="min-h-screen w-full bg-[#f8f9fa] text-[#202124] flex items-center justify-center p-6 font-sans antialiased select-none">
+        <div className="w-full max-w-[380px] bg-white border border-[#dadce0] rounded-lg shadow-sm p-8 text-center space-y-4">
+          <div className="w-14 h-14 mx-auto rounded-full bg-[#e6f4ea] text-[#188038] flex items-center justify-center text-[28px] animate-bounce">
+            ✓
+          </div>
+          <h1 className="text-[20px] font-medium text-[#188038]">Accès autorisé</h1>
+          {status === 'opening' && (
+            <div className="flex items-center justify-center gap-2.5 text-[13.5px] text-[#5f6368]">
+              <div
+                className="w-4 h-4 rounded-full border-2 border-[#dadce0] border-t-[#1a73e8] animate-spin"
+                role="status"
+                aria-label="Chargement"
+              />
+              <span>Ouverture de la conversation…</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen w-full bg-[#f8f9fa] text-[#202124] flex items-center justify-center p-6 font-sans antialiased">

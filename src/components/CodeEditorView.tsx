@@ -608,7 +608,7 @@ ${jsCode}
     <div className="h-screen w-full flex flex-col bg-[#18181b] text-[#e4e4e7] font-sans antialiased overflow-hidden">
       {/* Top IDE Bar */}
       <header className="h-[48px] bg-[#141417] border-b border-[#27272a] px-3 sm:px-4 flex items-center justify-between gap-3 shrink-0">
-        {/* Left: Brand + Project / Stealth Command Input */}
+        {/* Left: Brand + Project / Command Input */}
         <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"

@@ -19,9 +19,8 @@ interface GoogleNewTabViewProps {
   currentResponse: string | null;
   isNavigationTarget: (query: string) => boolean;
   onSendQuery: (query: string) => void;
-  // Portal hook: text starting with "/" is offered to the server first. Resolves to true when
-  // consumed; otherwise the text is searched normally. Undefined once the session is open.
-  onGateAttempt?: (query: string) => Promise<boolean>;
+  // Text starting with "/": resolves to true when handled, otherwise it is searched normally.
+  onSlashInput?: (query: string) => Promise<boolean>;
   onClearResponse: () => void;
   onGoHome: () => void;
   onOpenLegal: () => void;
@@ -36,7 +35,7 @@ export default function GoogleNewTabView({
   currentResponse,
   isNavigationTarget,
   onSendQuery,
-  onGateAttempt,
+  onSlashInput,
   onClearResponse,
   onGoHome,
   onOpenLegal,
@@ -80,7 +79,7 @@ export default function GoogleNewTabView({
     return () => window.removeEventListener('keydown', handleSlash, { capture: true });
   }, []);
 
-  // Keep Google message mode synced with cheat code activation state
+  // Keep Google message mode synced with the unlock state
   useEffect(() => {
     setMessageMode(isUnlocked);
     if (!isUnlocked) {
@@ -99,7 +98,7 @@ export default function GoogleNewTabView({
     }
   }, [resetSignal, isUnlocked]);
 
-  // Listen for ArrowUp, ArrowDown, ArrowLeft, ArrowRight to toggle stealth message mode (only when unlocked)
+  // Listen for ArrowUp, ArrowDown, ArrowLeft, ArrowRight to toggle message mode (only when unlocked)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -179,7 +178,7 @@ export default function GoogleNewTabView({
       return;
     }
 
-    // 2. If messageMode is active, send message to connected fake pages
+    // 2. If messageMode is active, send message to the connected pages
     if (messageMode) {
       onSendQuery(trimmed);
       setQuery('');
@@ -187,9 +186,9 @@ export default function GoogleNewTabView({
       return;
     }
 
-    // 3. Portal: slash text is checked by the server; if refused it is just a search
-    if (onGateAttempt && trimmed.startsWith('/')) {
-      const consumed = await onGateAttempt(trimmed);
+    // 3. Slash commands
+    if (onSlashInput && trimmed.startsWith('/')) {
+      const consumed = await onSlashInput(trimmed);
       if (consumed) {
         setQuery('');
         return;
@@ -236,8 +235,8 @@ export default function GoogleNewTabView({
                 setQuery('');
                 return;
               }
-              if (onGateAttempt && trimmed.startsWith('/')) {
-                if (await onGateAttempt(trimmed)) {
+              if (onSlashInput && trimmed.startsWith('/')) {
+                if (await onSlashInput(trimmed)) {
                   setQuery('');
                   return;
                 }
